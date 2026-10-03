@@ -9,6 +9,10 @@ pub struct EveWindow {
 
 /// Trait for window management across different display servers and compositors
 pub trait WindowManager: Send + Sync {
+    /// GNOME's compositor draws native previews; their IDs are not XIDs.
+    fn uses_compositor_previews(&self) -> bool {
+        false
+    }
     /// Get all EVE Online client windows
     fn get_eve_windows(&self) -> Result<Vec<EveWindow>>;
 

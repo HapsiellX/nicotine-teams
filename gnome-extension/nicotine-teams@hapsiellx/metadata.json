@@ -1,0 +1,8 @@
+{
+  "uuid": "nicotine-teams@hapsiellx",
+  "name": "Nicotine Teams Bridge",
+  "description": "EVE-only window discovery, manual client selection and compositor previews for Nicotine Teams.",
+  "shell-version": ["50"],
+  "version": 1,
+  "url": "https://github.com/HapsiellX/nicotine-teams"
+}

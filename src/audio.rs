@@ -3,10 +3,12 @@
 //! The OS audio handle (`MixerDeviceSink`) is `!Send`, so it lives entirely
 //! on this worker thread; the rest of the app only holds the channel `Sender`.
 
+#[cfg(feature = "audio-jingle")]
 use std::io::Cursor;
 use std::sync::mpsc::{channel, Sender};
 
 /// The jingle, embedded so it ships with the binary (like the fonts/icon).
+#[cfg(feature = "audio-jingle")]
 const JINGLE: &[u8] = include_bytes!("../assets/nicotinecountry.mp3");
 
 /// Spawn the audio worker. Returns a sender — send `()` to play the jingle
@@ -14,6 +16,7 @@ const JINGLE: &[u8] = include_bytes!("../assets/nicotinecountry.mp3");
 ///
 /// Best-effort: if no output device opens (or decoding fails) the commands
 /// are dropped without affecting the rest of the app.
+#[cfg(feature = "audio-jingle")]
 pub fn spawn() -> Sender<()> {
     let (tx, rx) = channel::<()>();
     std::thread::spawn(move || {
@@ -38,5 +41,11 @@ pub fn spawn() -> Sender<()> {
             }
         }
     });
+    tx
+}
+
+#[cfg(not(feature = "audio-jingle"))]
+pub fn spawn() -> Sender<()> {
+    let (tx, _) = channel::<()>();
     tx
 }

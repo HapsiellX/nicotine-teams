@@ -4,6 +4,7 @@
 // Linux XComposite manager share this file at
 // `~/.config/nicotine/preview_positions.toml`.
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,29 +24,36 @@ pub struct PreviewPositions {
 
 impl PreviewPositions {
     fn config_path() -> PathBuf {
-        let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        p.push("nicotine");
+        let mut p = crate::config::Config::config_dir();
         p.push("preview_positions.toml");
         p
     }
 
-    pub fn load() -> Self {
-        let path = Self::config_path();
-        if let Ok(s) = std::fs::read_to_string(&path) {
-            if let Ok(p) = toml::from_str::<Self>(&s) {
-                return p;
-            }
+    pub fn load_checked() -> Result<Self> {
+        match std::fs::read_to_string(Self::config_path()) {
+            Ok(contents) => toml::from_str(&contents).context("Ungültiges Vorschau-Layout"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error.into()),
         }
-        Self::default()
+    }
+
+    pub fn load() -> Self {
+        Self::load_checked().unwrap_or_else(|error| {
+            eprintln!("Vorschau-Layout konnte nicht geladen werden: {error}");
+            Self::default()
+        })
+    }
+
+    pub fn save_checked(&self) -> Result<()> {
+        crate::storage::atomic_write(
+            &Self::config_path(),
+            toml::to_string_pretty(self)?.as_bytes(),
+        )
     }
 
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(s) = toml::to_string_pretty(self) {
-            let _ = std::fs::write(&path, s);
+        if let Err(error) = self.save_checked() {
+            eprintln!("Vorschau-Layout konnte nicht gespeichert werden: {error}");
         }
     }
 

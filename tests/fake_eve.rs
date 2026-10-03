@@ -23,6 +23,107 @@
 mod common;
 
 #[cfg(unix)]
+#[test]
+#[ignore = "requires an isolated X11 desktop with XComposite"]
+fn team_profile_restores_live_preview_position_and_dimensions() {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt;
+    let _harness = common::FakeEveHarness::new(&["Alpha", "Beta"]).unwrap();
+    let daemon = common::TestDaemon::spawn().unwrap();
+    let (conn, screen) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[screen].root;
+    let wait_for_preview = |expected: (i16, i16, u16, u16)| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            let mut found = Vec::new();
+            for window in conn.query_tree(root).unwrap().reply().unwrap().children {
+                if let Ok(attributes) = conn.get_window_attributes(window).unwrap().reply() {
+                    if attributes.override_redirect
+                        && attributes.map_state == x11rb::protocol::xproto::MapState::VIEWABLE
+                    {
+                        if let Ok(geometry) = conn.get_geometry(window).unwrap().reply() {
+                            if geometry.width >= 120 && geometry.height >= 80 {
+                                found.push((
+                                    geometry.x,
+                                    geometry.y,
+                                    geometry.width,
+                                    geometry.height,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if found == vec![expected] {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("Preview did not reach {expected:?}");
+    };
+    let layout = daemon
+        .config_path
+        .parent()
+        .unwrap()
+        .join("preview_positions.toml");
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&daemon.config_path).unwrap()).unwrap();
+    config.as_table_mut().unwrap().insert(
+        "characters".into(),
+        toml::Value::Array(vec!["Alpha".into()]),
+    );
+    config["show_previews"] = true.into();
+    std::fs::write(&daemon.config_path, toml::to_string(&config).unwrap()).unwrap();
+    std::fs::write(&layout, "[positions]\nAlpha = [50, 80]\n").unwrap();
+    daemon.nicotine_stdout(&["profile", "save", "Klein"]);
+    wait_for_preview((50, 80, 320, 180));
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&daemon.config_path).unwrap()).unwrap();
+    config["preview_width"] = 500.into();
+    config["preview_height"] = 300.into();
+    std::fs::write(&daemon.config_path, toml::to_string(&config).unwrap()).unwrap();
+    std::fs::write(&layout, "[positions]\nAlpha = [450, 120]\n").unwrap();
+    daemon.nicotine_stdout(&["profile", "save", "Groß"]);
+    wait_for_preview((450, 120, 500, 300));
+    daemon.nicotine_stdout(&["profile", "apply", "Klein"]);
+    wait_for_preview((50, 80, 320, 180));
+}
+
+#[test]
+#[ignore = "requires an isolated X11 desktop with a cooperative WM"]
+fn team_profile_switch_updates_running_daemon_and_empty_team_stays_empty() {
+    let harness = common::FakeEveHarness::new(&["Alpha", "Beta", "Gamma"]).unwrap();
+    let daemon = common::TestDaemon::spawn().unwrap();
+    let initial = std::fs::read_to_string(&daemon.config_path).unwrap();
+    daemon
+        .rewrite_config(&format!("{initial}\ncharacters = [\"Beta\", \"Alpha\"]\n"))
+        .unwrap();
+    daemon.nicotine_stdout(&["profile", "save", "Mining"]);
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&daemon.config_path).unwrap()).unwrap();
+    config["characters"] = toml::Value::Array(vec!["Gamma".into()]);
+    std::fs::write(&daemon.config_path, toml::to_string(&config).unwrap()).unwrap();
+    daemon.nicotine_stdout(&["profile", "save", "Missionen"]);
+    common::activate_window_directly(harness.clients[0].window).unwrap();
+    daemon.nicotine_stdout(&["profile", "apply", "Mining"]);
+    daemon.send("switch:1").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    assert_eq!(daemon.active_client_name().as_deref(), Some("Beta"));
+    daemon.nicotine_stdout(&["profile", "apply", "Missionen"]);
+    daemon.send("switch:1").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    assert_eq!(daemon.active_client_name().as_deref(), Some("Gamma"));
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&daemon.config_path).unwrap()).unwrap();
+    config["characters"] = toml::Value::Array(vec![]);
+    std::fs::write(&daemon.config_path, toml::to_string(&config).unwrap()).unwrap();
+    daemon.nicotine_stdout(&["profile", "save", "Leer"]);
+    daemon.send("forward").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    assert_eq!(daemon.active_client_name().as_deref(), Some("Gamma"));
+}
+
+#[cfg(unix)]
 use common::VirtualInput;
 use common::{
     activate_window_directly, nicotine_binary, skip_if_no_display, window_root_geometry,

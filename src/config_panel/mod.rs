@@ -66,6 +66,7 @@ pub(super) enum CaptureTarget {
 /// Which settings tab is shown in the left nav rail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tab {
+    Profiles,
     Display,
     Characters,
     Hotkeys,
@@ -81,6 +82,7 @@ pub(super) enum SliderField {
     PreviewWidth,
     PreviewHeight,
     PreviewOpacity,
+    PreviewFps,
     /// The single "size" slider shown when aspect ratio is constrained.
     /// Drives width; height follows from the locked ratio. Reuses the
     /// width range so the editable readout / clamp logic is shared.
@@ -93,6 +95,7 @@ impl SliderField {
             SliderField::PreviewWidth | SliderField::PreviewSize => 120..=800,
             SliderField::PreviewHeight => 80..=600,
             SliderField::PreviewOpacity => 10..=100,
+            SliderField::PreviewFps => 5..=60,
         }
     }
 
@@ -103,6 +106,7 @@ impl SliderField {
             SliderField::PreviewWidth => Message::PreviewWidthChanged(value),
             SliderField::PreviewHeight => Message::PreviewHeightChanged(value),
             SliderField::PreviewOpacity => Message::PreviewOpacityChanged(value),
+            SliderField::PreviewFps => Message::PreviewFpsChanged(value),
             SliderField::PreviewSize => Message::PreviewSizeChanged(value),
         }
     }
@@ -122,6 +126,7 @@ impl SliderField {
             SliderField::PreviewWidth | SliderField::PreviewSize => panel.config.preview_width,
             SliderField::PreviewHeight => panel.config.preview_height,
             SliderField::PreviewOpacity => panel.config.preview_opacity,
+            SliderField::PreviewFps => panel.config.preview_fps,
         }
     }
 }
@@ -185,7 +190,7 @@ impl std::fmt::Display for ModifierChoice {
 pub(super) const MODIFIER_CHOICES: &[ModifierChoice] = &[
     ModifierChoice {
         code: None,
-        label: "None",
+        label: "Keine",
     },
     ModifierChoice {
         code: Some(0x10),
@@ -205,7 +210,7 @@ pub(super) const MODIFIER_CHOICES: &[ModifierChoice] = &[
 pub(super) const MODIFIER_CHOICES: &[ModifierChoice] = &[
     ModifierChoice {
         code: None,
-        label: "None",
+        label: "Keine",
     },
     ModifierChoice {
         code: Some(42),
@@ -223,6 +228,13 @@ pub(super) const MODIFIER_CHOICES: &[ModifierChoice] = &[
 
 pub(super) struct Panel {
     pub config: Config,
+    pub new_profile_buffer: String,
+    pub selected_profile: Option<String>,
+    pub profile_file_buffer: String,
+    pub status: String,
+    pub status_is_error: bool,
+    pub desktop_notice: String,
+    pub native_previews: bool,
     /// Shared settings watched by the preview manager for live updates.
     pub live: Arc<Mutex<LiveSettings>>,
     /// Sends a play command to the audio worker thread (logo easter egg).
@@ -240,10 +252,6 @@ pub(super) struct Panel {
     pub dragging: Option<usize>,
     /// Cycle-list row currently under the cursor during a drag (drop target).
     pub drag_hover: Option<usize>,
-    /// Re-render ticks spent waiting for the async version check to land.
-    /// Bounds the post-launch poll so it can't spin forever if the check
-    /// never returns (e.g. offline).
-    pub version_polls: u8,
     /// In-progress text for each editable slider readout, keyed by field.
     /// Mirrors the value except while the user is typing, until they press
     /// Enter (commit) or drag the slider (re-sync).
@@ -277,6 +285,7 @@ impl Panel {
             config.preview_opacity.to_string(),
         );
         slider_text.insert(SliderField::PreviewSize, config.preview_width.to_string());
+        slider_text.insert(SliderField::PreviewFps, config.preview_fps.to_string());
         let aspect_ratio = aspect_ratio_of(config.preview_width, config.preview_height);
 
         // Hide Restack where it can't work. Only GNOME Wayland blocks
@@ -290,7 +299,30 @@ impl Panel {
         #[cfg(not(target_os = "linux"))]
         let restack_supported = true;
 
+        let selected_profile = config.team.active.clone();
+        #[cfg(unix)]
+        let (desktop_notice, native_previews) = if !restack_supported {
+            if crate::gnome_bridge::GnomeBridgeManager::new().is_ok() {
+                (
+                    "GNOME-Anbindung aktiv: native Wayland- und XWayland-Clients.".to_owned(),
+                    true,
+                )
+            } else {
+                ("Native Wayland-Clients benötigen die GNOME-Erweiterung. Nach der Installation einmal ab- und anmelden, dann Nicotine Teams neu starten.".to_owned(), false)
+            }
+        } else {
+            (String::new(), false)
+        };
+        #[cfg(not(unix))]
+        let (desktop_notice, native_previews) = (String::new(), false);
         Self {
+            desktop_notice,
+            native_previews,
+            selected_profile,
+            new_profile_buffer: String::new(),
+            profile_file_buffer: String::new(),
+            status: String::new(),
+            status_is_error: false,
             config,
             live,
             audio,
@@ -300,15 +332,32 @@ impl Panel {
             new_character_buffer: String::new(),
             capturing: None,
             last_change: None,
-            active_tab: Tab::Display,
+            active_tab: Tab::Profiles,
             dragging: None,
             drag_hover: None,
-            version_polls: 0,
         }
     }
 
     /// Mark the config as edited so the debounce subscription saves it
     /// once the user goes idle.
+    fn sync_live(&mut self) {
+        *self.live.lock().unwrap() = LiveSettings::from_config(&self.config)
+            .lock()
+            .unwrap()
+            .clone();
+        self.aspect_ratio = aspect_ratio_of(self.config.preview_width, self.config.preview_height);
+        for field in [
+            SliderField::PreviewWidth,
+            SliderField::PreviewHeight,
+            SliderField::PreviewSize,
+            SliderField::PreviewOpacity,
+            SliderField::PreviewFps,
+        ] {
+            self.slider_text
+                .insert(field, field.current_value(self).to_string());
+        }
+    }
+
     pub(super) fn touch(&mut self) {
         self.last_change = Some(Instant::now());
     }
@@ -382,6 +431,18 @@ impl Panel {
 
 #[derive(Debug, Clone)]
 pub(super) enum Message {
+    NewProfileChanged(String),
+    ProfileSelected(String),
+    ProfileFileChanged(String),
+    CreateProfile,
+    UpdateProfile,
+    ApplyProfile,
+    DeleteProfile,
+    ExportProfile,
+    ImportProfile,
+    DiscoverCharacters,
+    MinimizeToggled(bool),
+    PollProfiles,
     DisplayModeChanged(crate::config::DisplayMode),
     LockToggled(bool),
     RestackClicked,
@@ -413,17 +474,116 @@ pub(super) enum Message {
     PreviewHeightChanged(u32),
     PreviewSizeChanged(u32),
     PreviewOpacityChanged(u32),
+    PreviewFpsChanged(u32),
     SliderTextChanged(SliderField, String),
     SliderTextCommit(SliderField),
     OpenLink(String),
     FlushIfIdle,
-    VersionPoll,
     WindowResized(u32, u32),
     CloseRequested,
 }
 
 fn update(panel: &mut Panel, message: Message) -> Task<Message> {
     match message {
+        Message::NewProfileChanged(value) => panel.new_profile_buffer = value,
+        Message::ProfileSelected(value) => panel.selected_profile = Some(value),
+        Message::ProfileFileChanged(value) => panel.profile_file_buffer = value,
+        Message::CreateProfile
+        | Message::UpdateProfile
+        | Message::ApplyProfile
+        | Message::DeleteProfile
+        | Message::ExportProfile
+        | Message::ImportProfile => {
+            let selected = panel.selected_profile.clone();
+            let name = panel.new_profile_buffer.trim().to_owned();
+            let path = std::path::PathBuf::from(panel.profile_file_buffer.trim());
+            let result = match message {
+                Message::CreateProfile => panel.config.save_team(&name, false).map(|_| {
+                    panel.selected_profile = Some(name.clone());
+                    panel.new_profile_buffer.clear();
+                    format!("Profil angelegt: {name}")
+                }),
+                Message::ImportProfile => panel.config.import_team(&path).map(|name| {
+                    panel.selected_profile = Some(name.clone());
+                    format!("Profil importiert: {name}")
+                }),
+                _ => match selected {
+                    None => Err(anyhow::anyhow!("Bitte ein Profil auswählen")),
+                    Some(name) => match message {
+                        Message::UpdateProfile => panel.config.save_team(&name, true).map(|_| {
+                            format!("Aktuelle Einstellungen und Positionen gespeichert: {name}")
+                        }),
+                        Message::ApplyProfile => panel
+                            .config
+                            .apply_team(&name)
+                            .map(|_| format!("Profil geladen: {name}")),
+                        Message::DeleteProfile => panel.config.delete_team(&name).map(|_| {
+                            panel.selected_profile = panel.config.team.active.clone();
+                            format!(
+                                "Profil gelöscht: {name}; aktuelle Einstellungen bleiben erhalten"
+                            )
+                        }),
+                        Message::ExportProfile => panel
+                            .config
+                            .export_team(&name, &path)
+                            .map(|_| "Profil exportiert".to_owned()),
+                        _ => unreachable!(),
+                    },
+                },
+            };
+            match result {
+                Ok(status) => {
+                    panel.status = status;
+                    panel.status_is_error = false;
+                    if !matches!(message, Message::ExportProfile) {
+                        panel.last_change = None;
+                    }
+                    panel.capturing = None;
+                    panel.sync_live();
+                }
+                Err(error) => {
+                    panel.status = format!("{error:#}");
+                    panel.status_is_error = true;
+                }
+            }
+        }
+        Message::DiscoverCharacters => {
+            match crate::create_window_manager().and_then(|wm| wm.get_eve_windows()) {
+                Ok(windows) => {
+                    let mut added = 0;
+                    for window in windows {
+                        if !panel.config.characters.contains(&window.title) {
+                            panel.config.characters.push(window.title);
+                            added += 1;
+                        }
+                    }
+                    panel.status = format!("{added} angemeldete Charaktere hinzugefügt");
+                    panel.status_is_error = false;
+                    panel.touch();
+                }
+                Err(error) => {
+                    panel.status = error.to_string();
+                    panel.status_is_error = true;
+                }
+            }
+        }
+        Message::MinimizeToggled(value) => {
+            panel.config.minimize_inactive = value;
+            panel.touch();
+        }
+        Message::PollProfiles => {
+            if panel.last_change.is_none() && panel.capturing.is_none() {
+                if let Ok(config) = Config::load() {
+                    if config.team.revision != panel.config.team.revision {
+                        panel.config = config;
+                        panel.selected_profile = panel.config.team.active.clone();
+                        panel.sync_live();
+                        panel.status = "Profiländerung übernommen".to_owned();
+                        panel.status_is_error = false;
+                    }
+                }
+            }
+        }
         Message::DisplayModeChanged(mode) => {
             panel.config.display_mode = mode;
             panel.live.lock().unwrap().display_mode = mode;
@@ -624,6 +784,14 @@ fn update(panel: &mut Panel, message: Message) -> Task<Message> {
                 .insert(SliderField::PreviewHeight, height.to_string());
             panel.touch();
         }
+        Message::PreviewFpsChanged(fps) => {
+            panel.config.preview_fps = fps;
+            panel.live.lock().unwrap().preview_fps = fps;
+            panel
+                .slider_text
+                .insert(SliderField::PreviewFps, fps.to_string());
+            panel.touch();
+        }
         Message::PreviewOpacityChanged(o) => {
             panel.config.preview_opacity = o;
             panel.live.lock().unwrap().preview_opacity = o;
@@ -669,16 +837,13 @@ fn update(panel: &mut Panel, message: Message) -> Task<Message> {
             if let Some(t) = panel.last_change {
                 if t.elapsed() >= AUTOSAVE_DEBOUNCE {
                     if let Err(e) = panel.config.save() {
-                        eprintln!("config autosave failed: {e}");
+                        panel.status = format!("Speichern fehlgeschlagen: {e}");
+                        panel.status_is_error = true;
+                    } else {
+                        panel.last_change = None;
                     }
-                    panel.last_change = None;
                 }
             }
-        }
-        Message::VersionPoll => {
-            // The re-render this message triggers is the point — it lets
-            // the footer pick up the version-check result once it lands.
-            panel.version_polls = panel.version_polls.saturating_add(1);
         }
         Message::WindowResized(w, h) => {
             // Persist the panel size so it survives restarts. Only mark dirty
@@ -696,9 +861,11 @@ fn update(panel: &mut Panel, message: Message) -> Task<Message> {
             // within the autosave debounce) before we exit, so it isn't lost.
             // Paired with `exit_on_close_request(false)` so we control teardown;
             // `exit()` then ends the runtime (and tears the window down).
-            if panel.last_change.take().is_some() {
+            if panel.last_change.is_some() {
                 if let Err(e) = panel.config.save() {
-                    eprintln!("config save on close failed: {e}");
+                    panel.status = format!("Speichern fehlgeschlagen: {e}");
+                    panel.status_is_error = true;
+                    return Task::none();
                 }
             }
             return iced::exit();
@@ -721,6 +888,7 @@ fn view(panel: &Panel) -> Element<'_, Message> {
                 .height(Length::Fill),
         ]
         .height(Length::Fill),
+        ui::status_bar(panel),
         ui::footer(),
     ]
     .width(Length::Fill)
@@ -743,7 +911,8 @@ fn theme(_panel: &Panel) -> Theme {
 }
 
 fn subscription(panel: &Panel) -> Subscription<Message> {
-    let mut subs = Vec::new();
+    let mut subs =
+        vec![iced::time::every(Duration::from_millis(500)).map(|_| Message::PollProfiles)];
     // Only listen for raw key events while a bind button is armed.
     if panel.capturing.is_some() {
         subs.push(iced::keyboard::listen().map(Message::KeyEvent));
@@ -764,11 +933,6 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
                 _ => None,
             },
         ));
-    }
-    // Re-render a few times after launch so the async version-check result
-    // appears once it lands (iced only redraws on events, unlike egui).
-    if panel.version_polls < 20 && crate::version_check::get_update_status().is_none() {
-        subs.push(iced::time::every(Duration::from_millis(700)).map(|_| Message::VersionPoll));
     }
     // Persist panel window resizes. Always subscribed, but only fires on an
     // actual resize; the handler no-ops unless the size really changed.
@@ -1190,7 +1354,7 @@ pub fn run(config: Config, live: Arc<Mutex<LiveSettings>>) -> iced::Result {
     // iced feeds this to winit's `with_name` (Wayland app_id / X11 WM_CLASS).
     #[cfg(target_os = "linux")]
     {
-        window.platform_specific.application_id = "nicotine".to_string();
+        window.platform_specific.application_id = "nicotine-teams".to_string();
     }
 
     iced::application(
@@ -1198,7 +1362,7 @@ pub fn run(config: Config, live: Arc<Mutex<LiveSettings>>) -> iced::Result {
         update,
         view,
     )
-    .title("Nicotine")
+    .title("Nicotine Teams")
     .settings(iced::Settings {
         default_text_size: iced::Pixels(TEXT_SIZE),
         ..Default::default()
