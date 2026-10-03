@@ -38,6 +38,7 @@ pub struct LiveSettings {
     pub preview_width: u32,
     pub preview_height: u32,
     pub preview_opacity: u32,
+    pub preview_fps: u32,
     pub display_mode: DisplayMode,
     /// When true, both preview windows and the client-list window
     /// ignore mouse drags so they can't accidentally be knocked out of
@@ -54,6 +55,7 @@ pub struct LiveSettings {
     /// away from reappears. Read live so the toggle takes effect without
     /// a restart.
     pub hide_active_preview: bool,
+    pub layout_revision: u64,
 }
 
 impl LiveSettings {
@@ -62,16 +64,20 @@ impl LiveSettings {
             preview_width: config.preview_width,
             preview_height: config.preview_height,
             preview_opacity: config.preview_opacity,
+            preview_fps: config.preview_fps,
             display_mode: config.display_mode,
             positions_locked: config.positions_locked,
             show_previews: config.show_previews,
             hide_active_preview: config.hide_active_preview,
+            layout_revision: config.team.revision,
         }))
     }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default)]
+    pub team: crate::profiles::TeamProfiles,
     pub display_width: u32,
     pub display_height: u32,
     pub panel_height: u32,
@@ -110,6 +116,8 @@ pub struct Config {
     /// Preview-window opacity as a percentage, 10–100 (100 = fully opaque).
     #[serde(default = "default_preview_opacity")]
     pub preview_opacity: u32,
+    #[serde(default = "default_preview_fps")]
+    pub preview_fps: u32,
     /// Whether DWM preview windows are spawned at all (Windows only). When
     /// false, the daemon runs headless and you cycle via hotkeys / CLI only.
     #[serde(default = "default_show_previews")]
@@ -168,7 +176,7 @@ pub struct Config {
 
 #[cfg(unix)]
 fn default_enable_mouse() -> bool {
-    true
+    false
 }
 
 // Off by default on Windows — most users remap side buttons at the
@@ -259,6 +267,10 @@ fn default_preview_height() -> u32 {
     180
 }
 
+pub(crate) fn default_preview_fps() -> u32 {
+    15
+}
+
 fn default_preview_opacity() -> u32 {
     100
 }
@@ -300,7 +312,7 @@ impl Config {
     /// env var — so env-overriding APPDATA alone doesn't isolate.
     /// The override IS the full directory (no implicit `nicotine`
     /// subdir suffix), matching the value the test fixture provides.
-    fn config_dir() -> PathBuf {
+    pub(crate) fn config_dir() -> PathBuf {
         if let Ok(dir) = std::env::var("NICOTINE_CONFIG_DIR") {
             return PathBuf::from(dir);
         }
@@ -325,7 +337,8 @@ impl Config {
             fs::create_dir_all(parent)?;
         }
         let contents = toml::to_string_pretty(self).context("Failed to serialize config")?;
-        fs::write(&config_path, contents).context("Failed to write config.toml")?;
+        crate::storage::atomic_write(&config_path, contents.as_bytes())
+            .context("Failed to write config.toml")?;
         Ok(())
     }
 
@@ -365,8 +378,9 @@ impl Config {
         }
     }
 
-    fn build_default(display_width: u32, display_height: u32) -> Self {
+    pub(crate) fn build_default(display_width: u32, display_height: u32) -> Self {
         Self {
+            team: Default::default(),
             display_width,
             display_height,
             panel_height: 0,
@@ -386,6 +400,7 @@ impl Config {
             preview_width: default_preview_width(),
             preview_height: default_preview_height(),
             preview_opacity: default_preview_opacity(),
+            preview_fps: default_preview_fps(),
             show_previews: default_show_previews(),
             hide_active_preview: default_hide_active_preview(),
             constrain_aspect: default_constrain_aspect(),
@@ -417,7 +432,7 @@ impl Config {
             fs::create_dir_all(parent)?;
         }
         let contents = toml::to_string_pretty(&config)?;
-        fs::write(&config_path, contents)?;
+        crate::storage::atomic_write(&config_path, contents.as_bytes())?;
         println!("Created config: {}", config_path.display());
         println!("Edit it to customize window sizes and positions");
 
@@ -434,7 +449,7 @@ impl Config {
             fs::create_dir_all(parent)?;
         }
         let contents = toml::to_string_pretty(&config)?;
-        fs::write(&config_path, contents)?;
+        crate::storage::atomic_write(&config_path, contents.as_bytes())?;
         println!("Created config: {}", config_path.display());
         Ok(())
     }
@@ -451,6 +466,7 @@ mod tests {
     #[test]
     fn test_eve_height_adjusted_with_panel() {
         let config = Config {
+            team: Default::default(),
             display_width: 1920,
             display_height: 1080,
             panel_height: 40,
@@ -472,6 +488,7 @@ mod tests {
             preview_width: 320,
             preview_height: 180,
             preview_opacity: 100,
+            preview_fps: default_preview_fps(),
             show_previews: true,
             hide_active_preview: false,
             constrain_aspect: false,
@@ -490,6 +507,7 @@ mod tests {
     #[test]
     fn test_eve_height_adjusted_without_panel() {
         let config = Config {
+            team: Default::default(),
             display_width: 1920,
             display_height: 1080,
             panel_height: 0,
@@ -511,6 +529,7 @@ mod tests {
             preview_width: 320,
             preview_height: 180,
             preview_opacity: 100,
+            preview_fps: default_preview_fps(),
             show_previews: true,
             hide_active_preview: false,
             constrain_aspect: false,
@@ -528,6 +547,7 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = Config {
+            team: Default::default(),
             display_width: 7680,
             display_height: 2160,
             panel_height: 0,
@@ -549,6 +569,7 @@ mod tests {
             preview_width: 320,
             preview_height: 180,
             preview_opacity: 55,
+            preview_fps: default_preview_fps(),
             show_previews: true,
             hide_active_preview: true,
             constrain_aspect: true,

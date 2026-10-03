@@ -5,7 +5,6 @@ use crate::ipc;
 use crate::keyboard_listener::{KeyboardConfig, KeyboardListener};
 #[cfg(unix)]
 use crate::mouse_listener::{MouseConfig, MouseListener};
-use crate::telemetry;
 use crate::window_manager::WindowManager;
 use anyhow::Result;
 use interprocess::local_socket::traits::ListenerExt as _;
@@ -71,7 +70,7 @@ impl Daemon {
         // per cycle command — those go over IPC and don't construct a
         // new Daemon. Detached + best-effort, so a network failure or
         // missing token never blocks startup.
-        telemetry::send_launch_ping();
+        // Personal fork: no upstream telemetry.
 
         let state = Arc::new(Mutex::new(CycleState::new()));
 
@@ -84,11 +83,7 @@ impl Daemon {
         // both targeted cycling (switch N) and forward/backward cycling.
         // Stored on CycleState too so the cycle methods don't need it as
         // a parameter.
-        let character_order = if config.characters.is_empty() {
-            None
-        } else {
-            Some(config.characters.clone())
-        };
+        let character_order = config.cycle_order();
         match &character_order {
             Some(names) => println!("Loaded {} character(s) from config.toml", names.len()),
             None => println!(
@@ -130,11 +125,9 @@ impl Daemon {
         // within ~500ms — no daemon restart needed.
         let wm_clone = Arc::clone(&self.wm);
         let state_clone = Arc::clone(&self.state);
-        let mut last_order: Option<Vec<String>> = if self.config.characters.is_empty() {
-            None
-        } else {
-            Some(self.config.characters.clone())
-        };
+        let mut last_order = self.config.cycle_order();
+        let live_reload = Arc::clone(&self.live);
+        let mut last_revision = self.config.team.revision;
         // Shared listener-config mutexes; the hot-reload thread writes
         // fresh snapshots into them so the always-running listener
         // threads pick up panel-driven changes within ~200ms.
@@ -183,11 +176,14 @@ impl Daemon {
             }
             // Re-read config.toml to detect changes to the characters list.
             if let Ok(fresh_config) = Config::load() {
-                let new_order = if fresh_config.characters.is_empty() {
-                    None
-                } else {
-                    Some(fresh_config.characters.clone())
-                };
+                let new_order = fresh_config.cycle_order();
+                if fresh_config.team.revision != last_revision {
+                    *live_reload.lock().unwrap() = LiveSettings::from_config(&fresh_config)
+                        .lock()
+                        .unwrap()
+                        .clone();
+                    last_revision = fresh_config.team.revision;
+                }
                 if new_order != last_order {
                     match &new_order {
                         Some(names) => {
@@ -298,6 +294,11 @@ impl Daemon {
         let wm_clone = Arc::clone(&self.wm);
         let state_clone = Arc::clone(&self.state);
         let live_clone = Arc::clone(&self.live);
+        if self.wm.uses_compositor_previews() {
+            crate::gnome_bridge::spawn_previews(live_clone);
+            println!("GNOME compositor preview manager started");
+            return;
+        }
         match crate::preview_x11::spawn(self.config.clone(), wm_clone, state_clone, live_clone) {
             Ok(_) => println!("Linux preview manager started (XRender path)"),
             Err(e) => eprintln!("Warning: Could not start Linux preview manager: {}", e),
@@ -339,6 +340,14 @@ impl Daemon {
         reader.read_line(&mut line)?;
 
         if let Some(command) = Command::from_str(&line) {
+            // CLI profile changes must affect the next IPC command, including minimize/stack.
+            if let Ok(fresh) = Config::load() {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .set_character_order(fresh.cycle_order());
+                self.config = fresh;
+            }
             match command {
                 Command::Forward => {
                     let mut state = self.state.lock().unwrap();

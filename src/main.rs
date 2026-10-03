@@ -17,13 +17,17 @@ mod lock;
 mod paths;
 mod preview_common;
 mod preview_positions;
-mod telemetry;
+mod profiles;
+mod storage;
 mod window_manager;
 
+#[allow(dead_code)] // Retain upstream version parser tests; fork updates are not polled.
 mod version_check;
 
 mod eve_match;
 
+#[cfg(unix)]
+mod gnome_bridge;
 #[cfg(unix)]
 mod keyboard_listener;
 #[cfg(unix)]
@@ -95,10 +99,13 @@ fn create_window_manager() -> Result<Arc<dyn WindowManager>> {
                     Ok(Arc::new(HyprlandManager::new()?))
                 }
                 WaylandCompositor::Gnome => {
-                    // GNOME runs EVE as XWayland clients; we drive them via
-                    // EWMH like the KWin backend. Restack is disabled (Mutter
-                    // blocks window positioning) — cycling + previews work.
-                    println!("Using GNOME/Mutter backend (XWayland EWMH; restack disabled)");
+                    if let Ok(manager) = gnome_bridge::GnomeBridgeManager::new() {
+                        println!("Using GNOME Shell bridge (native Wayland + XWayland)");
+                        return Ok(Arc::new(manager));
+                    }
+                    // The extension is not active: retain the XWayland fallback.
+                    // Native Wine Wayland windows require the Shell bridge.
+                    println!("Using GNOME/Mutter XWayland fallback; native clients require the GNOME bridge");
                     Ok(Arc::new(GnomeManager::new()?))
                 }
                 WaylandCompositor::Other => {
@@ -132,22 +139,24 @@ fn start_command(wm: Arc<dyn WindowManager>, config: Config) -> Result<()> {
     // UX as `nicotine.exe` start on Windows where the GUI process detaches
     // from any console. Pipe child stdout/stderr to a log file under
     // /tmp so a panicking egui/winit init doesn't disappear into /dev/null.
-    let stdout = std::fs::File::create("/tmp/nicotine.out").unwrap_or_else(|_| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open("/dev/null")
-            .expect("/dev/null")
-    });
-    let stderr = std::fs::File::create("/tmp/nicotine.err").unwrap_or_else(|_| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open("/dev/null")
-            .expect("/dev/null")
-    });
+    let stdout =
+        std::fs::File::create(paths::runtime_file_path("nicotine.out")).unwrap_or_else(|_| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/dev/null")
+                .expect("/dev/null")
+        });
+    let stderr =
+        std::fs::File::create(paths::runtime_file_path("nicotine.err")).unwrap_or_else(|_| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/dev/null")
+                .expect("/dev/null")
+        });
     let daemonize = Daemonize::new()
         .working_directory("/tmp")
         .umask(0o027)
@@ -160,7 +169,7 @@ fn start_command(wm: Arc<dyn WindowManager>, config: Config) -> Result<()> {
 
     // Async update check so the panel's footer can show "NEW VERSION
     // AVAILABLE" once the result lands — same pattern as Windows.
-    version_check::spawn_check();
+    // Fork builds stay offline; upstream update checks are not started.
 
     // Daemon (cycling, hotkey listeners, preview manager) runs in a
     // worker thread; the config panel owns the main thread so eframe's
@@ -195,7 +204,7 @@ fn start_command(wm: Arc<dyn WindowManager>, config: Config) -> Result<()> {
     // Kick off the GitHub-release check on a detached thread. The
     // config panel's footer renders a "NEW VERSION AVAILABLE" link
     // once the result lands (~1s after launch on a normal connection).
-    version_check::spawn_check();
+    // Fork builds stay offline; upstream update checks are not started.
 
     // If a separate daemon is already running (e.g. the user invoked
     // `nicotine.exe daemon` in headless mode), don't spawn a duplicate —
@@ -228,20 +237,10 @@ fn start_command(wm: Arc<dyn WindowManager>, config: Config) -> Result<()> {
 
 #[cfg(unix)]
 fn stop_command() {
-    // pkill matches against `comm` (the kernel's short process name)
-    // which is the binary's filename. That's `Nicotine` (capital N) —
-    // the Cargo.toml renames it for Windows Explorer convention, with
-    // the install scripts dropping a lowercase symlink so the CLI verb
-    // stays lowercase. The pre-0.5 stop path was `pkill -9 nicotine`
-    // which matched case-sensitively and silently no-op'd. `-i` makes
-    // it case-insensitive so the kill works regardless of which name
-    // the user invoked. pkill excludes its own process and parent by
-    // default, so the calling `Nicotine stop` doesn't kill itself.
-    let _ = std::process::Command::new("pkill")
-        .args(["-9", "-i", "nicotine"])
-        .output();
-    let _ = std::fs::remove_file("/tmp/nicotine.sock");
-    let _ = std::fs::remove_file(paths::lock_file_path());
+    // Target this installation's IPC socket; never kill another Nicotine instance.
+    if let Err(error) = ipc::send_line("quit") {
+        eprintln!("Kein erreichbarer Daemon: {error}");
+    }
 }
 
 #[cfg(windows)]
@@ -261,11 +260,7 @@ fn run_cycle_direct(wm: &Arc<dyn WindowManager>, config: &Config, op: CycleOp) -
         return Ok(());
     }
 
-    let character_order = if config.characters.is_empty() {
-        None
-    } else {
-        Some(config.characters.clone())
-    };
+    let character_order = config.cycle_order();
 
     let mut state = CycleState::new();
     state.set_character_order(character_order.clone());
@@ -311,7 +306,15 @@ fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("");
 
-    let config = Config::load()?;
+    let mut config = Config::load()?;
+    if command == "profile" {
+        return profiles::cli(&mut config, &args[2..]);
+    }
+    if command == "panel" {
+        let live = LiveSettings::from_config(&config);
+        config_panel::run(config, live).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        return Ok(());
+    }
     let wm = create_window_manager()?;
 
     match command {
@@ -429,7 +432,7 @@ fn main() -> Result<()> {
                 println!();
                 println!("Usage:");
                 println!("  nicotine start         - Start everything (daemon + previews + control panel)");
-                println!("  nicotine stop          - Stop all Nicotine processes");
+                println!("  nicotine stop          - Stop this installation's daemon");
                 println!("  nicotine stack         - Stack all EVE windows");
                 println!("  nicotine forward       - Cycle forward");
                 println!("  nicotine backward      - Cycle backward");

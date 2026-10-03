@@ -33,7 +33,7 @@ fn filled(color: Color) -> container::Style {
 pub(super) fn header() -> Element<'static, Message> {
     container(
         mouse_area(
-            text("Nicotine")
+            text("Nicotine Teams")
                 .font(LOGO_FONT)
                 .size(LOGO_SIZE)
                 .color(NICOTINE_CREAM),
@@ -47,36 +47,17 @@ pub(super) fn header() -> Element<'static, Message> {
 }
 
 pub(super) fn footer() -> Element<'static, Message> {
-    let links = row![
-        link_button("GITHUB", "https://github.com/isomerc"),
-        text("•").size(CAPTION_SIZE).color(NICOTINE_GOLD),
-        link_button(
-            "ILLUMINATED IS RECRUITING",
-            "https://www.illuminatedcorp.com"
-        ),
-    ]
-    .spacing(14)
-    .align_y(Alignment::Center);
-
-    let badge: Element<'static, Message> = match crate::version_check::get_update_status() {
-        Some(crate::version_check::UpdateStatus::Outdated { version, url }) => {
-            link_button(format!("NEW VERSION AVAILABLE (v{version})"), url)
-        }
-        Some(crate::version_check::UpdateStatus::UpToDate) => text("LATEST VERSION")
-            .size(CAPTION_SIZE)
-            .color(NICOTINE_GREEN)
-            .font(BOLD)
-            .into(),
-        None => Space::new().into(),
-    };
-
-    let bar =
-        container(row![links, Space::new().width(Length::Fill), badge].align_y(Alignment::Center))
-            .width(Length::Fill)
-            .padding([10, 16])
-            .style(|_| filled(NICOTINE_CREAM));
-
-    column![divider(), bar].into()
+    container(
+        row![
+            text("Nicotine Teams · lokale Profile").size(CAPTION_SIZE),
+            Space::new().width(Length::Fill),
+            link_button("UPSTREAM / MIT", "https://github.com/isomerc/nicotine"),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .padding([10, 16])
+    .width(Length::Fill)
+    .into()
 }
 
 fn link_button(label: impl Into<String>, url: impl Into<String>) -> Element<'static, Message> {
@@ -95,9 +76,14 @@ fn link_button(label: impl Into<String>, url: impl Into<String>) -> Element<'sta
 
 pub(super) fn tab_sidebar(panel: &Panel) -> Element<'_, Message> {
     let col = column![
-        tab_button("Display", Tab::Display, panel.active_tab == Tab::Display),
         tab_button(
-            "Characters",
+            "Teamprofile",
+            Tab::Profiles,
+            panel.active_tab == Tab::Profiles
+        ),
+        tab_button("Anzeige", Tab::Display, panel.active_tab == Tab::Display),
+        tab_button(
+            "Charaktere",
             Tab::Characters,
             panel.active_tab == Tab::Characters
         ),
@@ -145,6 +131,7 @@ pub(super) fn vdivider() -> Element<'static, Message> {
 
 pub(super) fn tab_content(panel: &Panel) -> Element<'_, Message> {
     let inner: Element<'_, Message> = match panel.active_tab {
+        Tab::Profiles => profiles_section(panel),
         Tab::Display => column![display_mode_section(panel), previews_section(panel)]
             .spacing(20)
             .into(),
@@ -155,6 +142,64 @@ pub(super) fn tab_content(panel: &Panel) -> Element<'_, Message> {
         .padding([12, 16])
         .width(Length::Fill)
         .into()
+}
+
+pub(super) fn status_bar(panel: &Panel) -> Element<'_, Message> {
+    let mut content =
+        column![text(&panel.status)
+            .size(CAPTION_SIZE)
+            .color(if panel.status_is_error {
+                NICOTINE_RED
+            } else {
+                NICOTINE_GREEN
+            })];
+    if !panel.desktop_notice.is_empty() {
+        content = content.push(text(&panel.desktop_notice).size(CAPTION_SIZE));
+    }
+    container(content)
+        .padding([4, 16])
+        .width(Length::Fill)
+        .into()
+}
+
+fn profiles_section(panel: &Panel) -> Element<'_, Message> {
+    let names: Vec<String> = panel.config.team.profiles.keys().cloned().collect();
+    let active = panel.config.team.active.as_deref().unwrap_or("Kein Profil");
+    let mut col = column![
+        section_header("Teamprofile"),
+        text(format!("Aktiv: {active}")),
+        caption("Ein Profil speichert Team, Reihenfolge, Hotkeys und Vorschau-Layout. Änderungen werden erst mit „Profil aktualisieren“ in den gespeicherten Schnappschuss übernommen."),
+        row![
+            pick_list(names, panel.selected_profile.as_ref(), Message::ProfileSelected)
+                .placeholder("Profil auswählen")
+                .width(Length::Fill),
+            button(text("Laden")).on_press(Message::ApplyProfile),
+        ].spacing(8),
+        row![
+            button(text("Profil aktualisieren")).on_press(Message::UpdateProfile),
+            button(text("Löschen")).on_press(Message::DeleteProfile),
+        ].spacing(8),
+        row![
+            text_input("Neues Profil, z. B. Mining", &panel.new_profile_buffer)
+                .on_input(Message::NewProfileChanged)
+                .on_submit(Message::CreateProfile)
+                .width(Length::Fill),
+            button(text("Anlegen")).on_press(Message::CreateProfile),
+        ].spacing(8),
+        caption("Vor dem Anlegen das Team im Reiter „Charaktere“ einstellen. Ein leeres aktives Team wechselt zu keinem Client."),
+        section_header("Profil übertragen"),
+        text_input("Absoluter Pfad zu einer JSON-Datei", &panel.profile_file_buffer)
+            .on_input(Message::ProfileFileChanged),
+        row![
+            button(text("Exportieren")).on_press(Message::ExportProfile),
+            button(text("Importieren")).on_press(Message::ImportProfile),
+        ].spacing(8),
+        caption("Exportdateien enthalten Charakternamen und Hotkeys, keine Zugangsdaten oder Gerätepfade. Vorhandene Dateien und Profile werden nicht überschrieben."),
+    ].spacing(12);
+    if !panel.restack_supported {
+        col = col.push(caption("GNOME Wayland: Vorschaupositionen sind nutzbar. Die automatische Anordnung der EVE-Spielfenster folgt in einer späteren Erweiterung."));
+    }
+    col.into()
 }
 
 fn section_header(label: &'static str) -> Element<'static, Message> {
@@ -228,36 +273,45 @@ fn drag_row_style(is_dragged: bool, is_target: bool) -> container::Style {
 
 fn display_mode_section(panel: &Panel) -> Element<'_, Message> {
     let mut col = column![
-        section_header("Display Mode"),
+        section_header("Darstellung"),
         caption(
-            "How Nicotine shows your running clients on screen. Preview windows mirror each \
-             client live; the list view is a compact always-on-top window of names."
+            "Live-Vorschauen zeigen deine Clients. Die Charakterliste bietet eine kompakte Übersicht."
         ),
         row![
             radio(
-                "Preview windows",
+                "Vorschaufenster",
                 DisplayMode::Previews,
                 Some(panel.config.display_mode),
                 Message::DisplayModeChanged,
             ),
             radio(
-                "Client list",
+                "Charakterliste",
                 DisplayMode::List,
                 Some(panel.config.display_mode),
                 Message::DisplayModeChanged,
             ),
         ]
         .spacing(16),
-        checkbox(panel.config.positions_locked)
-            .label("Lock positions (drag disabled on previews and list)")
-            .on_toggle(Message::LockToggled),
+        checkbox(panel.config.minimize_inactive)
+            .label("Inaktiven Client beim Wechsel minimieren")
+            .on_toggle(Message::MinimizeToggled),
     ]
     .spacing(8);
+
+    if panel.native_previews {
+        col = col.push(caption("GNOME-Vorschauen übernehmen gespeicherte Positionen. Direktes Ziehen folgt im Layout-Editor."));
+    } else {
+        col = col.push(
+            checkbox(panel.config.positions_locked)
+                .label("Positionen sperren")
+                .on_toggle(Message::LockToggled),
+        );
+    }
 
     // Hidden on GNOME Wayland, where the compositor blocks window
     // positioning so restacking can't do anything.
     if panel.restack_supported {
-        col = col.push(button(text("Restack EVE Windows")).on_press(Message::RestackClicked));
+        col = col.push(button(text("EVE-Fenster anordnen")).on_press(Message::RestackClicked));
     }
 
     col.into()
@@ -265,19 +319,22 @@ fn display_mode_section(panel: &Panel) -> Element<'_, Message> {
 
 fn characters_section(panel: &Panel) -> Element<'_, Message> {
     let mut col = column![
-        section_header("Cycle Order"),
+        section_header("Charakterreihenfolge"),
         caption(
-            "Characters cycle in the order shown. Names must match EVE's window title exactly \
-             (the part after \"EVE - \")."
+            "Die Reihenfolge bestimmt den Wechsel. Namen müssen dem EVE-Fenstertitel entsprechen."
         ),
     ]
     .spacing(8);
+
+    col = col.push(
+        button(text("Angemeldete Charaktere hinzufügen")).on_press(Message::DiscoverCharacters),
+    );
 
     for (i, name) in panel.config.characters.iter().enumerate() {
         let row1 = row![
             grip(i),
             text(format!("{}.", i + 1)),
-            text_input("character name", name)
+            text_input("Charaktername", name)
                 .on_input(move |s| Message::CharacterNameChanged(i, s))
                 .width(Length::Fill),
             button(text("↑")).on_press(Message::MoveCharacterUp(i)),
@@ -343,8 +400,8 @@ fn characters_section(panel: &Panel) -> Element<'_, Message> {
 
     col = col.push(
         row![
-            text("Add:"),
-            text_input("new character", &panel.new_character_buffer)
+            text("Neu:"),
+            text_input("Neuer Charakter", &panel.new_character_buffer)
                 .on_input(Message::NewCharacterChanged)
                 .on_submit(Message::AddCharacter)
                 .width(Length::Fill),
@@ -360,34 +417,34 @@ fn characters_section(panel: &Panel) -> Element<'_, Message> {
 fn hotkeys_section(panel: &Panel) -> Element<'_, Message> {
     let forward = bind_row(
         panel,
-        "Forward:",
+        "Vorwärts:",
         CaptureTarget::ForwardKey,
         code_to_label(panel.config.forward_key),
     );
     let backward = bind_row(
         panel,
-        "Backward:",
+        "Rückwärts:",
         CaptureTarget::BackwardKey,
         code_to_label(panel.config.backward_key),
     );
 
     let modifier_label = match panel.config.modifier_key {
         Some(vk) => code_to_label(vk),
-        None => "None".to_string(),
+        None => "Keine".to_string(),
     };
     let mut modifier = bind_row(
         panel,
-        "Modifier:",
+        "Zusatztaste:",
         CaptureTarget::ModifierKey,
         modifier_label,
     );
     if panel.config.modifier_key.is_some() {
-        modifier = modifier.push(button(text("Clear")).on_press(Message::ClearModifier));
+        modifier = modifier.push(button(text("Entfernen")).on_press(Message::ClearModifier));
     }
 
     let toggle_label = match panel.config.toggle_previews_key {
         Some(vk) => code_to_label(vk),
-        None => "None".to_string(),
+        None => "Keine".to_string(),
     };
     let toggle_mod_selected = MODIFIER_CHOICES
         .iter()
@@ -395,7 +452,7 @@ fn hotkeys_section(panel: &Panel) -> Element<'_, Message> {
         .find(|m| m.code == panel.config.toggle_previews_modifier);
     let mut toggle_previews = bind_row(
         panel,
-        "Toggle previews:",
+        "Vorschau umschalten:",
         CaptureTarget::TogglePreviews,
         toggle_label,
     );
@@ -409,32 +466,29 @@ fn hotkeys_section(panel: &Panel) -> Element<'_, Message> {
     );
     if panel.config.toggle_previews_key.is_some() {
         toggle_previews =
-            toggle_previews.push(button(text("Clear")).on_press(Message::ClearTogglePreviews));
+            toggle_previews.push(button(text("Entfernen")).on_press(Message::ClearTogglePreviews));
     }
 
     column![
-        section_header("Keyboard Hotkeys"),
+        section_header("Tastenkürzel"),
         checkbox(panel.config.enable_keyboard_buttons)
-            .label("Enable keyboard cycling")
+            .label("Wechsel über Tastatur aktivieren")
             .on_toggle(Message::KeyboardEnabledToggled),
         forward,
         backward,
         modifier,
         caption(
-            "Click a binding to record the next key you press. Esc cancels. Set both keys to the \
-             same value with a modifier to cycle backward via modifier+key (e.g. Tab + Shift+Tab)."
+            "Taste anklicken und neue Taste drücken. Esc bricht ab. Bei gleichen Wechseltasten gilt die Zusatztaste für rückwärts."
         ),
         toggle_previews,
         caption(
-            "Toggle previews shows/hides all preview windows with one key — independent of \
-             keyboard cycling. Leave unbound if you don't want it."
+            "Der Vorschau-Hotkey blendet alle Vorschauen ein oder aus."
         ),
         checkbox(panel.config.enable_mouse_buttons)
-            .label("Cycle on mouse side buttons (XBUTTON1/XBUTTON2)")
+            .label("Wechsel über Maus-Seitentasten")
             .on_toggle(Message::MouseEnabledToggled),
         caption(
-            "Off by default. Turn on only if you don't already remap your mouse side buttons via \
-             driver software (Logi Options+, Razer Synapse, etc.)."
+            "Globale Hotkeys benötigen Zugriff auf Eingabegeräte. Desktop-Tastenkürzel zu den CLI-Befehlen funktionieren ohne diese Freigabe."
         ),
     ]
     .spacing(8)
@@ -443,15 +497,15 @@ fn hotkeys_section(panel: &Panel) -> Element<'_, Message> {
 
 fn previews_section(panel: &Panel) -> Element<'_, Message> {
     let mut col = column![
-        section_header("Preview Windows"),
+        section_header("Vorschaufenster"),
         checkbox(panel.config.show_previews)
-            .label("Show preview windows")
+            .label("Vorschaufenster anzeigen")
             .on_toggle(Message::ShowPreviewsToggled),
         checkbox(panel.config.hide_active_preview)
-            .label("Hide the active client's preview")
+            .label("Vorschau des aktiven Clients ausblenden")
             .on_toggle(Message::HideActivePreviewToggled),
         checkbox(panel.config.constrain_aspect)
-            .label("Constrain aspect ratio")
+            .label("Seitenverhältnis beibehalten")
             .on_toggle(Message::ConstrainAspectToggled),
     ]
     .spacing(8);
@@ -462,7 +516,7 @@ fn previews_section(panel: &Panel) -> Element<'_, Message> {
         col = col.push(slider_field(
             panel,
             SliderField::PreviewSize,
-            "Size:",
+            "Größe:",
             panel.config.preview_width,
             "px",
         ));
@@ -470,23 +524,34 @@ fn previews_section(panel: &Panel) -> Element<'_, Message> {
         col = col.push(slider_field(
             panel,
             SliderField::PreviewWidth,
-            "Width:",
+            "Breite:",
             panel.config.preview_width,
             "px",
         ));
         col = col.push(slider_field(
             panel,
             SliderField::PreviewHeight,
-            "Height:",
+            "Höhe:",
             panel.config.preview_height,
             "px",
         ));
     }
 
+    if !panel.native_previews {
+        col = col.push(slider_field(
+            panel,
+            SliderField::PreviewFps,
+            "FPS:",
+            panel.config.preview_fps,
+            "FPS",
+        ));
+    } else {
+        col = col.push(caption("GNOME zeichnet Live-Vorschauen im Compositor. Die FPS-Begrenzung gilt für X11-Vorschauen."));
+    }
     col = col.push(slider_field(
         panel,
         SliderField::PreviewOpacity,
-        "Opacity:",
+        "Deckkraft:",
         panel.config.preview_opacity,
         "%",
     ));
@@ -509,7 +574,7 @@ fn slider_field<'a>(
         .map(String::as_str)
         .unwrap_or("");
     row![
-        text(label).width(Length::Fixed(70.0)),
+        text(label).width(Length::Fixed(92.0)),
         slider(field.range(), value, move |v| field.change_message(v)).step(1u32),
         text_input("", buffer)
             .on_input(move |s| Message::SliderTextChanged(field, s))
@@ -546,7 +611,7 @@ fn bind_button(
 ) -> Element<'static, Message> {
     let is_capturing = panel.capturing.as_ref() == Some(&target);
     let txt = if is_capturing {
-        "[press key — Esc]".to_string()
+        "[Taste drücken — Esc]".to_string()
     } else {
         label
     };

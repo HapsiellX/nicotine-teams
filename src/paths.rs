@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// file doesn't collide with a real running daemon's. In production:
 /// - Linux: `/tmp` (matches the historical hardcoded paths).
 /// - Windows: the user's cache dir under a `nicotine` subdir.
-fn runtime_path(filename: &str) -> PathBuf {
+pub(crate) fn runtime_file_path(filename: &str) -> PathBuf {
     if let Ok(dir) = std::env::var("NICOTINE_RUNTIME_DIR") {
         let mut p = PathBuf::from(dir);
         let _ = std::fs::create_dir_all(&p);
@@ -27,5 +27,5 @@ fn runtime_path(filename: &str) -> PathBuf {
 }
 
 pub fn lock_file_path() -> PathBuf {
-    runtime_path("nicotine-cycle.lock")
+    runtime_file_path("nicotine-cycle.lock")
 }

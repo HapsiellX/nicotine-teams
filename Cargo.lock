@@ -2582,7 +2582,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nicotine"
-version = "0.5.0"
+version = "0.6.1-teams.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2605,6 +2605,7 @@ dependencies = [
  "wayland-protocols",
  "windows 0.59.0",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

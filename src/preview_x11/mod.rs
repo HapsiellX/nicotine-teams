@@ -77,17 +77,6 @@ const RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
 /// to be invisible — the scan is ~3 sync round-trips, perceptible at
 /// 10Hz but not at 0.5Hz.
 const WINDOW_SCAN_BACKSTOP: Duration = Duration::from_secs(2);
-/// 8ms ≈ 125Hz polling, slightly above a 120Hz display's vblank rate.
-/// Composites + presents are gated on damage events, so an idle loop
-/// iteration is just one poll_for_event call — cheap. Going faster than
-/// display rate kills the "present 1 vblank too late" cadence that an
-/// exactly-60fps loop hits on a 120Hz panel.
-const FRAME_INTERVAL: Duration = Duration::from_millis(8);
-
-// Phase 3 still hardcodes preview dimensions; Phase 4 (live size sliders)
-// will pull these from config / LiveSettings. Includes chrome — a 480×270
-// preview is 480×270 total, with 24px title + 3px border eating into the
-// thumbnail area.
 const PREVIEW_WIDTH: u16 = 480;
 const PREVIEW_HEIGHT: u16 = 270;
 
@@ -250,6 +239,7 @@ fn run_manager(
     // surface. We start with the same value so the first tick doesn't
     // waste work tearing down a surface we never created.
     let initial_mode = live.lock_recover().display_mode;
+    let initial_layout_revision = live.lock_recover().layout_revision;
 
     let mut manager = PreviewManager {
         conn: Arc::clone(&conn),
@@ -269,6 +259,7 @@ fn run_manager(
         last_applied_size,
         last_applied_opacity,
         current_mode: initial_mode,
+        last_layout_revision: initial_layout_revision,
         list_window: None,
         needs_window_scan: true,
         last_window_scan: Instant::now(),
@@ -293,6 +284,7 @@ struct Atoms {
 }
 
 struct PreviewManager {
+    last_layout_revision: u64,
     conn: Arc<RustConnection>,
     screen_num: usize,
     /// Reserved for Phase 5+ (display mode toggle reads `config.display_mode`,
@@ -392,17 +384,29 @@ impl PreviewManager {
             }
             self.conn.flush()?;
 
-            next_frame += FRAME_INTERVAL;
+            let fps = self.live.lock_recover().preview_fps.clamp(5, 60);
+            let frame_interval = Duration::from_nanos(1_000_000_000 / fps as u64);
+            next_frame += frame_interval;
             let now = Instant::now();
             if let Some(wait) = next_frame.checked_duration_since(now) {
                 std::thread::sleep(wait);
             } else {
-                next_frame = now + FRAME_INTERVAL;
+                next_frame = now + frame_interval;
             }
         }
     }
 
     fn reconcile(&mut self) -> Result<()> {
+        let revision = self.live.lock_recover().layout_revision;
+        if revision != self.last_layout_revision {
+            let positions = PreviewPositions::load_checked()?;
+            *self.positions.lock_recover() = positions;
+            self.previews.clear();
+            self.list_window = None;
+            self.needs_window_scan = true;
+            self.next_offset = 0;
+            self.last_layout_revision = revision;
+        }
         // Panel show/hide toggle. Drop all surfaces when the user
         // unchecks "Show preview windows" so the manager goes truly
         // dark (no override_redirect windows lingering, no XComposite
@@ -497,7 +501,10 @@ impl PreviewManager {
             self.needs_window_scan = true;
         }
         if self.needs_window_scan {
-            let eve_windows = self.find_eve_windows()?;
+            let mut eve_windows = self.find_eve_windows()?;
+            if let Some(order) = self.state.lock_recover().character_order() {
+                eve_windows.retain(|(_, title)| order.contains(title));
+            }
             let live: HashSet<String> = eve_windows.iter().map(|(_, t)| t.clone()).collect();
 
             // Drop previews whose source disappeared. OwnedPreview::drop
